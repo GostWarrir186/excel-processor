@@ -1,74 +1,111 @@
 from flask import Flask, request, jsonify
-import base64, traceback, os
-from io import BytesIO
 import openpyxl
 from openpyxl.styles import PatternFill
+import urllib.request
+import json, io, base64, os, traceback
 
 app = Flask(__name__)
 
-PROHIBITED_STEMS = [
-    'мазь','таблет','лекарств','бижутер','украшен','золот','серебр',
-    'цеп','ожерель','колье','чокер','подвес','кулон','серьг','сережк',
-    'кафф','клипс','пусет','браслет','кольц','оружи','колец',
-]
-RED    = PatternFill(start_color='FF0000', end_color='FF0000', fill_type='solid')
-YELLOW = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
+RED_FILL    = PatternFill(start_color="FFFF0000", end_color="FFFF0000", fill_type="solid")
+YELLOW_FILL = PatternFill(start_color="FFFFFF00", end_color="FFFFFF00", fill_type="solid")
 
-def process_excel(usd_rate, file_bytes):
-    wb = openpyxl.load_workbook(BytesIO(file_bytes))
-    ws = wb.active
-    violators, prohibited_items = [], []
-    for row in ws.iter_rows(min_row=2):
-        try:
-            # Пропустить уже покрашенные строки
-            existing = row[0].fill
-            if existing and existing.fill_type not in (None, 'none') and existing.fgColor.rgb not in ('00000000', 'FF000000'):
-                continue
-            product   = str(row[9].value  or '')
-            amount    = float(row[15].value or 0)
-            full_name = f"{row[18].value or ''} {row[19].value or ''}".strip()
-            amount_usd = round(amount / usd_rate, 2) if usd_rate > 0 else 0
-            lower = product.lower()
-            is_prohibited = any(s in lower for s in PROHIBITED_STEMS)
-            fill = None
-            if amount_usd > 200:
-                fill = YELLOW
-                violators.append({'name': full_name, 'product': product, 'amountUSD': amount_usd})
-            elif is_prohibited:
-                fill = RED
-                prohibited_items.append({'name': full_name, 'product': product, 'amountUSD': amount_usd})
-            if fill:
-                for c in range(26): row[c].fill = fill
-        except Exception:
-            continue
-    buf = BytesIO()
-    wb.save(buf)
-    return {
-        'success': True,
-        'violators': violators,
-        'prohibited': prohibited_items,
-        'totalProcessed': ws.max_row - 1,
-        'fileBase64': base64.b64encode(buf.getvalue()).decode(),
-    }
 
-@app.route('/', methods=['GET'])
+def get_usd_tjs_rate():
+    url = 'https://open.er-api.com/v6/latest/USD'
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    with urllib.request.urlopen(req, timeout=10) as response:
+        data = json.loads(response.read())
+    return data['rates']['TJS']
+
+
+@app.route('/')
+@app.route('/health')
 def health():
     return jsonify({'status': 'ok'})
+
 
 @app.route('/process', methods=['POST'])
 def process():
     try:
-        if request.files.get('file'):
-            usd_rate   = float(request.form.get('usdRate', 10))
-            file_bytes = request.files['file'].read()
-        else:
-            data       = request.get_json()
-            usd_rate   = float(data['usdRate'])
-            file_bytes = base64.b64decode(data['fileBase64'])
-        return jsonify(process_excel(usd_rate, file_bytes))
+        # Курс: берём переданный или запрашиваем сами
+        usd_rate_param = request.form.get('usdRate')
+        rate = float(usd_rate_param) if usd_rate_param else get_usd_tjs_rate()
+        limit = 200 * rate
+
+        file = request.files['file']
+        wb = openpyxl.load_workbook(file)
+        ws = wb.active
+
+        # Найти нужные колонки по заголовку
+        header_row = [cell.value for cell in ws[1]]
+        color_col = sum_col = name_col = phone_col = None
+        for i, h in enumerate(header_row):
+            if h == '_rowColor':               color_col = i + 1
+            if h == 'Сумма':                   sum_col   = i + 1
+            if h == 'Имя получателя физ. лица': name_col = i + 1
+            if h == 'Контактный номер':         phone_col = i + 1
+
+        # Сгруппировать суммы по человеку (имя + телефон)
+        groups = {}
+        rows_data = []
+        for row in ws.iter_rows(min_row=2):
+            name  = row[name_col  - 1].value if name_col  else ''
+            phone = row[phone_col - 1].value if phone_col else ''
+            key   = str(name) + str(phone)
+            amount = row[sum_col - 1].value if sum_col else 0
+            color  = row[color_col - 1].value if color_col else 'none'
+            groups[key] = groups.get(key, 0) + (amount or 0)
+            rows_data.append({'row': row, 'key': key, 'color': color, 'name': str(name)})
+
+        violators, prohibited_items = [], []
+        seen_violators = set()
+
+        for item in rows_data:
+            row   = item['row']
+            color = item['color']
+            key   = item['key']
+            name  = item['name']
+
+            if color == 'red':
+                for cell in row:
+                    if color_col and cell.column != color_col:
+                        cell.fill = RED_FILL
+                prohibited_items.append({
+                    'name': name,
+                    'amountUSD': round(groups[key] / rate, 2)
+                })
+            elif groups[key] > limit:
+                for cell in row:
+                    if color_col and cell.column != color_col:
+                        cell.fill = YELLOW_FILL
+                if name not in seen_violators:
+                    seen_violators.add(name)
+                    violators.append({
+                        'name': name,
+                        'amountUSD': round(groups[key] / rate, 2)
+                    })
+
+        # Удалить служебную колонку _rowColor
+        if color_col:
+            ws.delete_cols(color_col)
+
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        return jsonify({
+            'success': True,
+            'violators': violators,
+            'prohibited': prohibited_items,
+            'totalProcessed': ws.max_row - 1,
+            'usdRate': rate,
+            'fileBase64': base64.b64encode(output.read()).decode(),
+        })
+
     except Exception as e:
         return jsonify({'success': False, 'error': str(e), 'trace': traceback.format_exc()}), 500
 
+
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5679))
+    port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
