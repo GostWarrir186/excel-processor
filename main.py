@@ -1,9 +1,10 @@
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import json, base64, traceback, os, cgi
+from flask import Flask, request, jsonify
+import base64, traceback, os
 from io import BytesIO
-from datetime import datetime
 import openpyxl
 from openpyxl.styles import PatternFill
+
+app = Flask(__name__)
 
 PROHIBITED_STEMS = [
     'мазь','таблет','лекарств','бижутер','украшен','золот','серебр',
@@ -46,43 +47,24 @@ def process_excel(usd_rate, file_bytes):
         'fileBase64': base64.b64encode(buf.getvalue()).decode(),
     }
 
-class Handler(BaseHTTPRequestHandler):
-    def log_message(self, format, *args):
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] {format % args}", flush=True)
+@app.route('/', methods=['GET'])
+def health():
+    return jsonify({'status': 'ok'})
 
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b'{"status":"ok"}')
-
-    def do_POST(self):
-        try:
-            content_type = self.headers.get('Content-Type', '')
-            if 'multipart/form-data' in content_type:
-                form = cgi.FieldStorage(fp=self.rfile, headers=self.headers,
-                    environ={'REQUEST_METHOD': 'POST', 'CONTENT_TYPE': content_type})
-                usd_rate   = float(form.getvalue('usdRate', '10'))
-                file_bytes = form['file'].file.read()
-            else:
-                length = int(self.headers.get('Content-Length', 0))
-                data   = json.loads(self.rfile.read(length))
-                usd_rate   = float(data['usdRate'])
-                file_bytes = base64.b64decode(data['fileBase64'])
-            result = process_excel(usd_rate, file_bytes)
-            self._respond(200, result)
-        except Exception as e:
-            self._respond(500, {'success': False, 'error': str(e), 'trace': traceback.format_exc()})
-
-    def _respond(self, code, payload):
-        body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
-        self.send_response(code)
-        self.send_header('Content-Type', 'application/json; charset=utf-8')
-        self.send_header('Content-Length', str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+@app.route('/process', methods=['POST'])
+def process():
+    try:
+        if request.files.get('file'):
+            usd_rate   = float(request.form.get('usdRate', 10))
+            file_bytes = request.files['file'].read()
+        else:
+            data       = request.get_json()
+            usd_rate   = float(data['usdRate'])
+            file_bytes = base64.b64decode(data['fileBase64'])
+        return jsonify(process_excel(usd_rate, file_bytes))
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e), 'trace': traceback.format_exc()}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5679))
-    server = HTTPServer(('0.0.0.0', port), Handler)
-    print(f"✅ Excel processor running on port {port}", flush=True)
-    server.serve_forever()
+    app.run(host='0.0.0.0', port=port)
