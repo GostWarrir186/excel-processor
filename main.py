@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
+"""
+Excel Registry Processor — HTTP service for n8n
+Deploy to Railway, Render, or any Python host.
+POST /process  { "usdRate": 10.5, "fileBase64": "..." }
+"""
+
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import json, base64, traceback, os
+import json, base64, traceback, os, cgi
 from io import BytesIO
 from datetime import datetime
+
 import openpyxl
 from openpyxl.styles import PatternFill
 
@@ -14,10 +21,12 @@ PROHIBITED_STEMS = [
 RED    = PatternFill(start_color='FF0000', end_color='FF0000', fill_type='solid')
 YELLOW = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
 
-def process_excel(usd_rate, file_bytes):
+
+def process_excel(usd_rate: float, file_bytes: bytes):
     wb = openpyxl.load_workbook(BytesIO(file_bytes))
     ws = wb.active
     violators, prohibited_items = [], []
+
     for row in ws.iter_rows(min_row=2):
         try:
             product   = str(row[9].value  or '')
@@ -37,6 +46,7 @@ def process_excel(usd_rate, file_bytes):
                 for c in range(26): row[c].fill = fill
         except Exception:
             continue
+
     buf = BytesIO()
     wb.save(buf)
     return {
@@ -47,21 +57,36 @@ def process_excel(usd_rate, file_bytes):
         'fileBase64': base64.b64encode(buf.getvalue()).decode(),
     }
 
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         print(f"[{datetime.now().strftime('%H:%M:%S')}] {format % args}", flush=True)
+
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b'{"status":"ok"}')
+
     def do_POST(self):
         try:
-            length = int(self.headers.get('Content-Length', 0))
-            data   = json.loads(self.rfile.read(length))
-            result = process_excel(float(data['usdRate']), base64.b64decode(data['fileBase64']))
+            content_type = self.headers.get('Content-Type', '')
+            if 'multipart/form-data' in content_type:
+                # Form data with binary file
+                form = cgi.FieldStorage(fp=self.rfile, headers=self.headers,
+                    environ={'REQUEST_METHOD': 'POST', 'CONTENT_TYPE': content_type})
+                usd_rate   = float(form.getvalue('usdRate', '10'))
+                file_bytes = form['file'].file.read()
+            else:
+                # JSON with base64
+                length = int(self.headers.get('Content-Length', 0))
+                data   = json.loads(self.rfile.read(length))
+                usd_rate   = float(data['usdRate'])
+                file_bytes = base64.b64decode(data['fileBase64'])
+            result = process_excel(usd_rate, file_bytes)
             self._respond(200, result)
         except Exception as e:
             self._respond(500, {'success': False, 'error': str(e), 'trace': traceback.format_exc()})
+
     def _respond(self, code, payload):
         body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
         self.send_response(code)
@@ -69,6 +94,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5679))
