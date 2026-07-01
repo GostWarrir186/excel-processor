@@ -6,6 +6,9 @@ import json, io, base64, os, traceback
 
 app = Flask(__name__)
 
+# Хранилище состояния в памяти
+registry_state = {}
+
 RED_FILL    = PatternFill(start_color="FFFF0000", end_color="FFFF0000", fill_type="solid")
 YELLOW_FILL = PatternFill(start_color="FFFFFF00", end_color="FFFFFF00", fill_type="solid")
 
@@ -41,6 +44,18 @@ def find_col(headers, *names):
 @app.route('/health')
 def health():
     return jsonify({'status': 'ok'})
+
+
+@app.route('/state', methods=['POST'])
+def save_state():
+    global registry_state
+    registry_state = request.get_json()
+    return jsonify({'ok': True})
+
+
+@app.route('/state', methods=['GET'])
+def get_state():
+    return jsonify(registry_state)
 
 
 @app.route('/process', methods=['POST'])
