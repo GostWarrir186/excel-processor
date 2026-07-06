@@ -40,68 +40,92 @@ def is_prohibited_keyword(product):
     return any(stem in lower for stem in PROHIBITED_STEMS)
 
 
+GROQ_PROMPT_TEMPLATE = """Ты таможенный инспектор Таджикистана. Из списка товаров определи ТОЛЬКО запрещённые к ввозу.
+
+ЗАПРЕЩЁННЫЕ (помечай):
+- Ювелирные украшения: серьги, кольца ювелирные/обручальные/помолвочные, браслеты, цепочки на шею, кулоны, подвески на шею, броши, колье, ожерелья, чокеры, пусеты, каффы, бижутерия
+- Лекарства и мази: таблетки лечебные, мази медицинские, крема лечебные от болезней (псориаз, грибок, артрит, геморрой и т.д.)
+
+РАЗРЕШЁННЫЕ (НЕ помечай ни при каких условиях):
+- Часы любые
+- Чехлы для телефонов, электроника, аксессуары
+- Обувь (кроссовки, сабо, туфли, сланцы и т.д.)
+- Косметика (крема для лица/ног уходовые, маски для волос, масла для волос, скрабы, тени, помады, духи, солнцезащитные крема)
+- Сумки, рюкзаки, клатчи (даже на цепочке)
+- Посуда
+- Зоотовары (ошейники, пасты для кошек, поводки)
+- Товары для ногтей (верхние формы, фольга, органайзеры)
+- Игрушки, антистресс
+- Книги
+- Рыболовные снасти
+- Строительные материалы
+- Брелоки
+- Кольца для волос, украшения для кос/дредов
+- Кольца уплотнительные, зажимы, держатели (промышленные)
+- Таблетки для посудомойки/бассейна, таблетницы
+- Тесты на беременность, глюкометры (медицинские устройства, не лекарства)
+- Пистолеты для пирсинга
+- Этикетки, наклейки
+- Затирки, клей, герметики
+- Товары-заменители, рандомные товары
+
+Товары (индекс. название):
+{numbered}
+
+Ответь ТОЛЬКО JSON массивом индексов запрещённых товаров. Только цифры через запятую в скобках [].
+Пример ответа: [2, 5, 11]
+Если запрещённых нет: []"""
+
+
+def call_groq_chunk(chunk_products, offset):
+    """Отправляет один чанк товаров в Groq, возвращает set глобальных индексов запрещённых."""
+    numbered = '\n'.join(f"{offset + i}. {p}" for i, p in enumerate(chunk_products))
+    prompt = GROQ_PROMPT_TEMPLATE.format(numbered=numbered)
+
+    data = json.dumps({
+        "model": "llama-3.3-70b-versatile",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": 2000,
+    }).encode('utf-8')
+
+    req = urllib.request.Request(
+        'https://api.groq.com/openai/v1/chat/completions',
+        data=data,
+        headers={
+            'Authorization': f'Bearer {GROQ_API_KEY}',
+            'Content-Type': 'application/json',
+        }
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        result = json.loads(resp.read())
+
+    content = result['choices'][0]['message']['content'].strip()
+    print(f"Groq chunk offset={offset} response: {content[:200]}", flush=True)
+
+    match = re.search(r'\[[\d,\s]*\]', content)
+    if match:
+        return set(json.loads(match.group()))
+    return set()
+
+
 def classify_products_groq(products):
-    """Отправляет список уникальных товаров в Groq, возвращает set индексов запрещённых."""
+    """Отправляет список уникальных товаров в Groq чанками, возвращает set индексов запрещённых."""
     if not products or not GROQ_API_KEY:
         return None  # None = использовать fallback
 
-    numbered = '\n'.join(f"{i}. {p}" for i, p in enumerate(products))
-
-    prompt = f"""Ты таможенный инспектор Таджикистана. Определи ЗАПРЕЩЁННЫЕ к ввозу товары из списка.
-
-ЗАПРЕЩЁННЫЕ категории:
-1. Ювелирные украшения: серьги, кольца (обручальные, помолвочные, ювелирные), браслеты, цепочки ювелирные, кулоны, подвески, броши, колье, ожерелья, чокеры, пусеты, каффы, клипсы-украшения для ушей, бижутерия
-2. Лекарства: таблетки лечебные, капсулы лечебные, мази медицинские, медикаменты
-
-РАЗРЕШЁННЫЕ (не помечай):
-- Часы (наручные, настенные, электронные)
-- Косметика (крема, скрабы, тени, маски для лица, помады, духи)
-- Электроника (телефоны, наушники, ноутбуки, зарядки, чехлы)
-- Одежда и обувь любого цвета и материала
-- Сумки, клатчи, кошельки (в т.ч. на цепочке)
-- Посуда (миски, салатники, термосы, даже золотистые/серебристые)
-- Таблетки для посудомоечных/стиральных машин, таблетки-очистители
-- Пустые капсулы, капсулы для кофемашины
-- Цепи велосипедные, мотоциклетные, промышленные
-- Зоотовары (ошейники, поводки, когтеточки)
-- Пуговицы, фурнитура, нашивки
-- Игрушки, спортивные товары
-- Продукты питания (в т.ч. конфеты "Золотой ключик" и т.д.)
-- Строительные материалы, инструменты
-- Кольца уплотнительные, зажимы, держатели (не украшения)
-
-Товары:
-{numbered}
-
-Ответь ТОЛЬКО JSON массивом индексов запрещённых товаров. Пример: [0, 3, 7]
-Если запрещённых нет — ответь: []"""
+    CHUNK_SIZE = 400
+    prohibited_indices = set()
 
     try:
-        data = json.dumps({
-            "model": "llama-3.1-8b-instant",
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0,
-            "max_tokens": 1000,
-        }).encode('utf-8')
+        for offset in range(0, len(products), CHUNK_SIZE):
+            chunk = products[offset:offset + CHUNK_SIZE]
+            chunk_result = call_groq_chunk(chunk, offset)
+            prohibited_indices |= chunk_result
+            if offset + CHUNK_SIZE < len(products):
+                import time; time.sleep(2)  # пауза между чанками
 
-        req = urllib.request.Request(
-            'https://api.groq.com/openai/v1/chat/completions',
-            data=data,
-            headers={
-                'Authorization': f'Bearer {GROQ_API_KEY}',
-                'Content-Type': 'application/json',
-            }
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            result = json.loads(resp.read())
-
-        content = result['choices'][0]['message']['content'].strip()
-        print(f"Groq response: {content}", flush=True)
-
-        match = re.search(r'\[[\d,\s]*\]', content)
-        if match:
-            return set(json.loads(match.group()))
-        return set()
+        return prohibited_indices
 
     except Exception as e:
         print(f"Groq error: {e}", flush=True)
@@ -149,12 +173,20 @@ def get_state():
 @app.route('/process', methods=['POST'])
 def process():
     try:
-        usd_rate_param = request.form.get('usdRate')
+        # Поддержка двух форматов: JSON (n8n) и form-data
+        if request.is_json:
+            payload = request.get_json()
+            usd_rate_param = payload.get('usdRate')
+            file_bytes = base64.b64decode(payload['fileBase64'])
+            wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
+        else:
+            usd_rate_param = request.form.get('usdRate')
+            file_bytes_io = request.files['file']
+            wb = openpyxl.load_workbook(file_bytes_io)
+
         rate = float(usd_rate_param) if usd_rate_param else get_usd_tjs_rate()
         limit = 200 * rate
 
-        file = request.files['file']
-        wb = openpyxl.load_workbook(file)
         ws = wb.active
 
         headers = [cell.value for cell in ws[1]]
