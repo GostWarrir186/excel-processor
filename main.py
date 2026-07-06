@@ -11,7 +11,7 @@ registry_state = {}
 RED_FILL    = PatternFill(start_color="FFFF0000", end_color="FFFF0000", fill_type="solid")
 YELLOW_FILL = PatternFill(start_color="FFFFFF00", end_color="FFFFFF00", fill_type="solid")
 
-GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 
 # Резервный список ключевых слов (если Groq недоступен)
 PROHIBITED_STEMS = [
@@ -77,31 +77,24 @@ GROQ_PROMPT_TEMPLATE = """Ты таможенный инспектор Тадж�
 Если запрещённых нет: []"""
 
 
-def call_groq_chunk(chunk_products, offset):
-    """Отправляет один чанк товаров в Groq, возвращает set глобальных индексов запрещённых."""
+def call_gemini_chunk(chunk_products, offset):
+    """Отправляет один чанк товаров в Gemini, возвращает set глобальных индексов запрещённых."""
     numbered = '\n'.join(f"{offset + i}. {p}" for i, p in enumerate(chunk_products))
     prompt = GROQ_PROMPT_TEMPLATE.format(numbered=numbered)
 
     data = json.dumps({
-        "model": "llama-3.1-8b-instant",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0,
-        "max_tokens": 2000,
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 2000},
     }).encode('utf-8')
 
-    req = urllib.request.Request(
-        'https://api.groq.com/openai/v1/chat/completions',
-        data=data,
-        headers={
-            'Authorization': f'Bearer {GROQ_API_KEY}',
-            'Content-Type': 'application/json',
-        }
-    )
+    url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}'
+    req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
+
     with urllib.request.urlopen(req, timeout=60) as resp:
         result = json.loads(resp.read())
 
-    content = result['choices'][0]['message']['content'].strip()
-    print(f"Groq chunk offset={offset} response: {content[:200]}", flush=True)
+    content = result['candidates'][0]['content']['parts'][0]['text'].strip()
+    print(f"Gemini chunk offset={offset} response: {content[:200]}", flush=True)
 
     match = re.search(r'\[[\d,\s]*\]', content)
     if match:
@@ -110,8 +103,8 @@ def call_groq_chunk(chunk_products, offset):
 
 
 def classify_products_groq(products):
-    """Отправляет список уникальных товаров в Groq чанками, возвращает set индексов запрещённых."""
-    if not products or not GROQ_API_KEY:
+    """Отправляет список уникальных товаров в Gemini чанками, возвращает set индексов запрещённых."""
+    if not products or not GEMINI_API_KEY:
         return None  # None = использовать fallback
 
     CHUNK_SIZE = 400
@@ -120,15 +113,15 @@ def classify_products_groq(products):
     try:
         for offset in range(0, len(products), CHUNK_SIZE):
             chunk = products[offset:offset + CHUNK_SIZE]
-            chunk_result = call_groq_chunk(chunk, offset)
+            chunk_result = call_gemini_chunk(chunk, offset)
             prohibited_indices |= chunk_result
             if offset + CHUNK_SIZE < len(products):
-                import time; time.sleep(2)  # пауза между чанками
+                import time; time.sleep(1)
 
         return prohibited_indices
 
     except Exception as e:
-        print(f"Groq error: {e}", flush=True)
+        print(f"Gemini error: {e}", flush=True)
         return None  # None = fallback на ключевые слова
 
 
