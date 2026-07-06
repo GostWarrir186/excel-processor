@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill
 import urllib.request
-import json, io, base64, os, traceback
+import json, io, base64, os, re, traceback
 
 app = Flask(__name__)
 
@@ -11,7 +11,9 @@ registry_state = {}
 RED_FILL    = PatternFill(start_color="FFFF0000", end_color="FFFF0000", fill_type="solid")
 YELLOW_FILL = PatternFill(start_color="FFFFFF00", end_color="FFFFFF00", fill_type="solid")
 
-# Ключевые слова для запрещённых товаров
+GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')
+
+# Резервный список ключевых слов (если Groq недоступен)
 PROHIBITED_STEMS = [
     'мазь', 'таблет', 'лекарств', 'бижутер', 'украшен',
     'ожерель', 'колье', 'чокер', 'кулон',
@@ -19,31 +21,91 @@ PROHIBITED_STEMS = [
     'браслет', 'оружи', 'брошь', 'подвеск',
     'золот', 'серебр', 'цепочк', 'кольц',
 ]
-
-# Если товар содержит любое из этих слов — НЕ красим (исключения)
 EXCLUSION_WORDS = [
-    # Таблетки не для людей
-    'посудомоеч', 'омывател', 'стиральн',
-    # Клипсы не украшения
-    'наушник',
-    # Кольца не украшения
+    'посудомоеч', 'омывател', 'стиральн', 'наушник',
     'зажим', 'уплотн', 'держател', 'люверс',
-    # Золото не ювелирка
     'конфет', 'миск', 'салатник', 'пуговиц',
-    'маска', 'для лица', 'тени для',
-    'мюли', 'туфл', 'сланц', 'кроссов', 'сабо',
-    'нержавеющ', 'из стали',
-    'наклейк', 'пикгард', 'гитар',
-    # Серебро не ювелирка
+    'маска', 'для лица', 'тени для', 'мюли', 'туфл', 'сланц', 'кроссов', 'сабо',
+    'нержавеющ', 'из стали', 'наклейк', 'пикгард', 'гитар',
     'скраб', 'крем', 'бейдж', 'косметик',
-    # Цепочка не украшение
     'клатч', 'пришивн', 'велосип', 'мотоцикл', 'ступиц', 'зубьев', 'концепц',
-    # Подвеска не украшение
-    'качел', 'гамак',
-    # Прочее
-    'пустые',  # пустые капсулы
-    'ошейник', 'для кошек', 'для собак',  # зоотовары
+    'качел', 'гамак', 'пустые', 'ошейник', 'для кошек', 'для собак',
 ]
+
+
+def is_prohibited_keyword(product):
+    lower = product.lower()
+    if any(excl in lower for excl in EXCLUSION_WORDS):
+        return False
+    return any(stem in lower for stem in PROHIBITED_STEMS)
+
+
+def classify_products_groq(products):
+    """Отправляет список уникальных товаров в Groq, возвращает set индексов запрещённых."""
+    if not products or not GROQ_API_KEY:
+        return None  # None = использовать fallback
+
+    numbered = '\n'.join(f"{i}. {p}" for i, p in enumerate(products))
+
+    prompt = f"""Ты таможенный инспектор Таджикистана. Определи ЗАПРЕЩЁННЫЕ к ввозу товары из списка.
+
+ЗАПРЕЩЁННЫЕ категории:
+1. Ювелирные украшения: серьги, кольца (обручальные, помолвочные, ювелирные), браслеты, цепочки ювелирные, кулоны, подвески, броши, колье, ожерелья, чокеры, пусеты, каффы, клипсы-украшения для ушей, бижутерия
+2. Лекарства: таблетки лечебные, капсулы лечебные, мази медицинские, медикаменты
+
+РАЗРЕШЁННЫЕ (не помечай):
+- Часы (наручные, настенные, электронные)
+- Косметика (крема, скрабы, тени, маски для лица, помады, духи)
+- Электроника (телефоны, наушники, ноутбуки, зарядки, чехлы)
+- Одежда и обувь любого цвета и материала
+- Сумки, клатчи, кошельки (в т.ч. на цепочке)
+- Посуда (миски, салатники, термосы, даже золотистые/серебристые)
+- Таблетки для посудомоечных/стиральных машин, таблетки-очистители
+- Пустые капсулы, капсулы для кофемашины
+- Цепи велосипедные, мотоциклетные, промышленные
+- Зоотовары (ошейники, поводки, когтеточки)
+- Пуговицы, фурнитура, нашивки
+- Игрушки, спортивные товары
+- Продукты питания (в т.ч. конфеты "Золотой ключик" и т.д.)
+- Строительные материалы, инструменты
+- Кольца уплотнительные, зажимы, держатели (не украшения)
+
+Товары:
+{numbered}
+
+Ответь ТОЛЬКО JSON массивом индексов запрещённых товаров. Пример: [0, 3, 7]
+Если запрещённых нет — ответь: []"""
+
+    try:
+        data = json.dumps({
+            "model": "llama-3.3-70b-versatile",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+            "max_tokens": 1000,
+        }).encode('utf-8')
+
+        req = urllib.request.Request(
+            'https://api.groq.com/openai/v1/chat/completions',
+            data=data,
+            headers={
+                'Authorization': f'Bearer {GROQ_API_KEY}',
+                'Content-Type': 'application/json',
+            }
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read())
+
+        content = result['choices'][0]['message']['content'].strip()
+        print(f"Groq response: {content}", flush=True)
+
+        match = re.search(r'\[[\d,\s]*\]', content)
+        if match:
+            return set(json.loads(match.group()))
+        return set()
+
+    except Exception as e:
+        print(f"Groq error: {e}", flush=True)
+        return None  # None = fallback на ключевые слова
 
 
 def get_usd_tjs_rate():
@@ -64,13 +126,6 @@ def find_col(headers, *names):
             if h and name.lower() in str(h).lower():
                 return i
     return None
-
-
-def is_prohibited(product):
-    lower = product.lower()
-    if any(excl in lower for excl in EXCLUSION_WORDS):
-        return False
-    return any(stem in lower for stem in PROHIBITED_STEMS)
 
 
 @app.route('/')
@@ -112,13 +167,12 @@ def process():
 
         print(f"Cols: sum={sum_col} name={name_col} surname={surname_col} phone={phone_col} product={product_col}", flush=True)
 
-        # Максимальная колонка с данными — красить только до неё
         max_data_col = max(
             (i + 1 for i, h in enumerate(headers) if h is not None),
             default=1
         )
 
-        # Сгруппировать суммы по человеку (все строки включая покрашенные)
+        # Первый проход: собрать данные и суммы
         groups = {}
         rows_data = []
 
@@ -141,6 +195,20 @@ def process():
                 'full_name': full_name, 'product': product
             })
 
+        # Классификация товаров через Groq (один батч-запрос)
+        unique_products = list(dict.fromkeys(
+            item['product'] for item in rows_data if item['product'].strip()
+        ))
+        prohibited_set = classify_products_groq(unique_products)
+        use_groq = prohibited_set is not None
+
+        if use_groq:
+            prohibited_products = {unique_products[i] for i in prohibited_set}
+            print(f"Groq classified {len(prohibited_products)} prohibited out of {len(unique_products)}", flush=True)
+        else:
+            print("Groq unavailable, using keyword fallback", flush=True)
+
+        # Второй проход: красить и собирать нарушителей
         violators, prohibited_items = [], []
         seen_violators, seen_prohibited = set(), set()
 
@@ -150,8 +218,12 @@ def process():
             name    = item['full_name']
             product = item['product']
 
-            row_prohibited = is_prohibited(product)
-            row_violator   = groups[key] > limit
+            if use_groq:
+                row_prohibited = product in prohibited_products
+            else:
+                row_prohibited = is_prohibited_keyword(product)
+
+            row_violator = groups[key] > limit
 
             # Считаем нарушителей со ВСЕХ строк (включая уже покрашенные)
             if row_violator:
@@ -179,7 +251,6 @@ def process():
             except Exception:
                 pass
 
-            # Красить только до последней колонки с данными
             if row_violator:
                 for cell in row[:max_data_col]:
                     cell.fill = YELLOW_FILL
@@ -197,6 +268,7 @@ def process():
             'prohibited': prohibited_items,
             'totalProcessed': ws.max_row - 1,
             'usdRate': rate,
+            'usedGroq': use_groq,
             'fileBase64': base64.b64encode(output.read()).decode(),
         })
 
