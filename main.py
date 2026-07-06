@@ -87,7 +87,7 @@ def call_gemini_chunk(chunk_products, offset):
         "generationConfig": {"temperature": 0, "maxOutputTokens": 2000},
     }).encode('utf-8')
 
-    url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}'
+    url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}'
     req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
 
     with urllib.request.urlopen(req, timeout=60) as resp:
