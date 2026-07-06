@@ -6,17 +6,45 @@ import json, io, base64, os, traceback
 
 app = Flask(__name__)
 
-# Хранилище состояния в памяти
 registry_state = {}
 
 RED_FILL    = PatternFill(start_color="FFFF0000", end_color="FFFF0000", fill_type="solid")
 YELLOW_FILL = PatternFill(start_color="FFFFFF00", end_color="FFFFFF00", fill_type="solid")
 
+# Ключевые слова для запрещённых товаров
 PROHIBITED_STEMS = [
-    'мазь','таблет','лекарств','бижутер','украшен','золот','серебр',
-    'цеп','ожерель','колье','чокер','подвес','кулон','серьг','сережк',
-    'кафф','клипс','пусет','браслет','кольц','оружи','колец',
+    'мазь', 'таблет', 'лекарств', 'бижутер', 'украшен',
+    'ожерель', 'колье', 'чокер', 'кулон',
+    'серьг', 'сережк', 'кафф', 'клипс', 'пусет',
+    'браслет', 'оружи', 'брошь', 'подвеск',
+    'золот', 'серебр', 'цепочк', 'кольц',
 ]
+
+# Если товар содержит любое из этих слов — НЕ красим (исключения)
+EXCLUSION_WORDS = [
+    # Таблетки не для людей
+    'посудомоеч', 'омывател', 'стиральн',
+    # Клипсы не украшения
+    'наушник',
+    # Кольца не украшения
+    'зажим', 'уплотн', 'держател', 'люверс',
+    # Золото не ювелирка
+    'конфет', 'миск', 'салатник', 'пуговиц',
+    'маска', 'для лица', 'тени для',
+    'мюли', 'туфл', 'сланц', 'кроссов', 'сабо',
+    'нержавеющ', 'из стали',
+    'наклейк', 'пикгард', 'гитар',
+    # Серебро не ювелирка
+    'скраб', 'крем', 'бейдж', 'косметик',
+    # Цепочка не украшение
+    'клатч', 'пришивн', 'велосип', 'мотоцикл', 'ступиц', 'зубьев', 'концепц',
+    # Подвеска не украшение
+    'качел', 'гамак',
+    # Прочее
+    'пустые',  # пустые капсулы
+    'ошейник', 'для кошек', 'для собак',  # зоотовары
+]
+
 
 def get_usd_tjs_rate():
     url = 'https://open.er-api.com/v6/latest/USD'
@@ -36,6 +64,13 @@ def find_col(headers, *names):
             if h and name.lower() in str(h).lower():
                 return i
     return None
+
+
+def is_prohibited(product):
+    lower = product.lower()
+    if any(excl in lower for excl in EXCLUSION_WORDS):
+        return False
+    return any(stem in lower for stem in PROHIBITED_STEMS)
 
 
 @app.route('/')
@@ -83,7 +118,7 @@ def process():
             default=1
         )
 
-        # Сгруппировать суммы по человеку
+        # Сгруппировать суммы по человеку (все строки включая покрашенные)
         groups = {}
         rows_data = []
 
@@ -101,7 +136,10 @@ def process():
                 amount = 0.0
 
             groups[key] = groups.get(key, 0) + amount
-            rows_data.append({'row': row, 'key': key, 'full_name': full_name, 'product': product})
+            rows_data.append({
+                'row': row, 'key': key,
+                'full_name': full_name, 'product': product
+            })
 
         violators, prohibited_items = [], []
         seen_violators, seen_prohibited = set(), set()
@@ -111,20 +149,26 @@ def process():
             key     = item['key']
             name    = item['full_name']
             product = item['product']
-            lower   = product.lower()
 
-            is_prohibited = any(s in lower for s in PROHIBITED_STEMS)
-            is_violator = groups[key] > limit
+            row_prohibited = is_prohibited(product)
+            row_violator   = groups[key] > limit
 
             # Считаем нарушителей со ВСЕХ строк (включая уже покрашенные)
-            if is_violator:
+            if row_violator:
                 if name not in seen_violators:
                     seen_violators.add(name)
-                    violators.append({'name': name, 'amountUSD': round(groups[key] / rate, 2)})
-            elif is_prohibited:
+                    violators.append({
+                        'name': name,
+                        'amountUSD': round(groups[key] / rate, 2)
+                    })
+            elif row_prohibited:
                 if name + product not in seen_prohibited:
                     seen_prohibited.add(name + product)
-                    prohibited_items.append({'name': name, 'product': product, 'amountUSD': round(groups[key] / rate, 2)})
+                    prohibited_items.append({
+                        'name': name,
+                        'product': product,
+                        'amountUSD': round(groups[key] / rate, 2)
+                    })
 
             # Не перекрашивать уже покрашенные строки
             try:
@@ -136,10 +180,10 @@ def process():
                 pass
 
             # Красить только до последней колонки с данными
-            if is_violator:
+            if row_violator:
                 for cell in row[:max_data_col]:
                     cell.fill = YELLOW_FILL
-            elif is_prohibited:
+            elif row_prohibited:
                 for cell in row[:max_data_col]:
                     cell.fill = RED_FILL
 
@@ -157,7 +201,11 @@ def process():
         })
 
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e), 'trace': traceback.format_exc()}), 500
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'trace': traceback.format_exc()
+        }), 500
 
 
 if __name__ == '__main__':
