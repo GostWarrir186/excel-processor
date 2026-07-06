@@ -27,12 +27,10 @@ def get_usd_tjs_rate():
 
 
 def find_col(headers, *names):
-    # Сначала точное совпадение
     for name in names:
         for i, h in enumerate(headers):
             if h and str(h).strip().upper() == name.strip().upper():
                 return i
-    # Потом частичное
     for name in names:
         for i, h in enumerate(headers):
             if h and name.lower() in str(h).lower():
@@ -79,6 +77,12 @@ def process():
 
         print(f"Cols: sum={sum_col} name={name_col} surname={surname_col} phone={phone_col} product={product_col}", flush=True)
 
+        # Максимальная колонка с данными — красить только до неё
+        max_data_col = max(
+            (i + 1 for i, h in enumerate(headers) if h is not None),
+            default=1
+        )
+
         # Сгруппировать суммы по человеку
         groups = {}
         rows_data = []
@@ -109,7 +113,20 @@ def process():
             product = item['product']
             lower   = product.lower()
 
-            # Не трогать уже покрашенные строки
+            is_prohibited = any(s in lower for s in PROHIBITED_STEMS)
+            is_violator = groups[key] > limit
+
+            # Считаем нарушителей со ВСЕХ строк (включая уже покрашенные)
+            if is_violator:
+                if name not in seen_violators:
+                    seen_violators.add(name)
+                    violators.append({'name': name, 'amountUSD': round(groups[key] / rate, 2)})
+            elif is_prohibited:
+                if name + product not in seen_prohibited:
+                    seen_prohibited.add(name + product)
+                    prohibited_items.append({'name': name, 'product': product, 'amountUSD': round(groups[key] / rate, 2)})
+
+            # Не перекрашивать уже покрашенные строки
             try:
                 existing = row[0].fill
                 if existing and existing.fill_type not in (None, 'none') and \
@@ -118,23 +135,13 @@ def process():
             except Exception:
                 pass
 
-            is_prohibited = any(s in lower for s in PROHIBITED_STEMS)
-
-            fill = None
-            if groups[key] > limit:
-                fill = YELLOW_FILL
-                if name not in seen_violators:
-                    seen_violators.add(name)
-                    violators.append({'name': name, 'amountUSD': round(groups[key] / rate, 2)})
+            # Красить только до последней колонки с данными
+            if is_violator:
+                for cell in row[:max_data_col]:
+                    cell.fill = YELLOW_FILL
             elif is_prohibited:
-                fill = RED_FILL
-                if name + product not in seen_prohibited:
-                    seen_prohibited.add(name + product)
-                    prohibited_items.append({'name': name, 'product': product, 'amountUSD': round(groups[key] / rate, 2)})
-
-            if fill:
-                for cell in row:
-                    cell.fill = fill
+                for cell in row[:max_data_col]:
+                    cell.fill = RED_FILL
 
         output = io.BytesIO()
         wb.save(output)
