@@ -78,7 +78,7 @@ def classify_products_groq(products):
 
     try:
         data = json.dumps({
-            "model": "llama-3.3-70b-versatile",
+            "model": "llama-3.1-8b-instant",
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0,
             "max_tokens": 1000,
