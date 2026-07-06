@@ -83,7 +83,7 @@ def call_groq_chunk(chunk_products, offset):
     prompt = GROQ_PROMPT_TEMPLATE.format(numbered=numbered)
 
     data = json.dumps({
-        "model": "llama-3.3-70b-versatile",
+        "model": "llama-3.1-8b-instant",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0,
         "max_tokens": 2000,
