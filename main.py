@@ -2,7 +2,8 @@ from flask import Flask, request, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill
 import urllib.request
-import json, io, base64, os, re, traceback
+import json, io, base64, os, re, traceback, zipfile, html
+from lxml import etree as _etree
 
 app = Flask(__name__)
 
@@ -30,6 +31,18 @@ EXCLUSION_WORDS = [
     'скраб', 'крем', 'бейдж', 'косметик',
     'клатч', 'пришивн', 'велосип', 'мотоцикл', 'ступиц', 'зубьев', 'концепц',
     'качел', 'гамак', 'пустые', 'ошейник', 'для кошек', 'для собак',
+    # Телефоны и техника
+    'чехол', 'лампа', 'фонарь', 'смарт', 'кабель',
+    # Аксессуары для волос (не украшения)
+    'для волос', 'для косичек', 'для дредов', 'резинка для',
+    # Товары для дома и быта
+    'шкатулк', 'таблетниц', 'для бачка', 'для унитаза', 'для чистки',
+    # Свечи и декор
+    'свеч',
+    # Рукоделие и материалы
+    'для рукодели', 'для создания', 'серебристый', 'серебристо',
+    # Автотовары
+    'автомобильн', 'для авто',
 ]
 
 
@@ -123,6 +136,78 @@ def classify_products_groq(products):
     except Exception as e:
         print(f"Gemini error: {e}", flush=True)
         return None  # None = fallback на ключевые слова
+
+
+def fix_xlsx_for_numbers(xlsx_bytes):
+    """Конвертирует inline strings → shared strings для совместимости с Apple Numbers."""
+    _NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+
+    pz = zipfile.ZipFile(io.BytesIO(xlsx_bytes))
+    files = {name: pz.read(name) for name in pz.namelist()}
+
+    tree = _etree.fromstring(files['xl/worksheets/sheet1.xml'])
+    shared_strings, shared_map = [], {}
+
+    def get_idx(text):
+        if text not in shared_map:
+            shared_map[text] = len(shared_strings)
+            shared_strings.append(text)
+        return shared_map[text]
+
+    for c in tree.iter(f'{{{_NS}}}c'):
+        if c.get('t') == 'inlineStr':
+            is_el = c.find(f'{{{_NS}}}is')
+            if is_el is None:
+                continue
+            t_el = is_el.find(f'{{{_NS}}}t')
+            text = (t_el.text or '') if t_el is not None else ''
+            idx = get_idx(text)
+            c.set('t', 's')
+            for child in list(c):
+                c.remove(child)
+            v = _etree.SubElement(c, f'{{{_NS}}}v')
+            v.text = str(idx)
+
+    files['xl/worksheets/sheet1.xml'] = _etree.tostring(
+        tree, xml_declaration=True, encoding='UTF-8', standalone=True
+    )
+
+    def esc(s):
+        return (s or '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+    def si_tag(s):
+        attr = ' xml:space="preserve"' if s != s.strip() else ''
+        return f'<si><t{attr}>{esc(s)}</t></si>'
+
+    count = len(shared_strings)
+    files['xl/sharedStrings.xml'] = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<sst xmlns="{_NS}" count="{count}" uniqueCount="{count}">'
+        + ''.join(si_tag(s) for s in shared_strings)
+        + '</sst>'
+    ).encode('utf-8')
+
+    ct = files['[Content_Types].xml'].decode('utf-8')
+    if 'sharedStrings' not in ct:
+        ct = ct.replace('</Types>',
+            '<Override PartName="/xl/sharedStrings.xml"'
+            ' ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/></Types>')
+    files['[Content_Types].xml'] = ct.encode('utf-8')
+
+    rels = files['xl/_rels/workbook.xml.rels'].decode('utf-8')
+    if 'sharedStrings' not in rels:
+        rels = rels.replace('</Relationships>',
+            '<Relationship Id="rId99"'
+            ' Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings"'
+            ' Target="sharedStrings.xml"/></Relationships>')
+    files['xl/_rels/workbook.xml.rels'] = rels.encode('utf-8')
+
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zout:
+        for name, data in files.items():
+            zout.writestr(name, data)
+    out.seek(0)
+    return out.read()
 
 
 def get_usd_tjs_rate():
@@ -286,6 +371,7 @@ def process():
         output = io.BytesIO()
         wb.save(output)
         output.seek(0)
+        fixed = fix_xlsx_for_numbers(output.read())
 
         return jsonify({
             'success': True,
@@ -294,7 +380,7 @@ def process():
             'totalProcessed': ws.max_row - 1,
             'usdRate': rate,
             'usedGroq': use_groq,
-            'fileBase64': base64.b64encode(output.read()).decode(),
+            'fileBase64': base64.b64encode(fixed).decode(),
         })
 
     except Exception as e:
